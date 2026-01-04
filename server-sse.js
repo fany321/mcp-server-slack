@@ -155,9 +155,37 @@ app.post('/message', (req, res) => {
   res.sendStatus(202);
 });
 
+// 簡易テスト用エンドポイント
+app.post('/test-slack', express.json(), async (req, res) => {
+  const { channel_id, text } = req.body;
+  
+  try {
+    const slackResponse = await fetch(
+      'https://slack.com/api/chat.postMessage',
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${SLACK_BOT_TOKEN}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          channel: channel_id,
+          text: text,
+        }),
+      }
+    );
+
+    const slackData = await slackResponse.json();
+    res.json(slackData);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log('=== MCP Server (SSE) ===');
   console.log(`🚀 Port ${PORT}`);
   console.log(`📡 SSE endpoint: GET /sse`);
   console.log(`📨 Message endpoint: POST /message`);
+
 });
