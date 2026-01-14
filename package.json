@@ -1,14 +1,29 @@
 {
-  "name": "mcp-server-working",
+  "name": "mcp-server-slack-duo-render",
   "version": "1.0.0",
+  "description": "MCP Server for Slack with Duo Token Verification (Render deployment)",
   "type": "module",
-  "main": "server.js",
+  "main": "server-http-duo-render.js",
   "scripts": {
-    "start": "node server-http.js"
+    "start": "node server-http-duo-render.js",
+    "dev": "node --watch server-http-duo-render.js"
   },
+  "keywords": [
+    "mcp",
+    "duo",
+    "slack",
+    "render",
+    "sse"
+  ],
+  "author": "",
+  "license": "MIT",
   "dependencies": {
+    "body-parser": "^1.20.3",
+    "dotenv": "^16.4.7",
     "express": "^4.21.2",
-    "ws": "^8.18.0",
-    "@modelcontextprotocol/sdk": "^0.5.0"
+    "node-fetch": "^3.3.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
