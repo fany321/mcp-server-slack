@@ -2,6 +2,7 @@ import express from 'express';
 import bodyParser from 'body-parser';
 import fetch from 'node-fetch';
 import dotenv from 'dotenv';
+import crypto from 'crypto';
 
 dotenv.config();
 
@@ -14,15 +15,25 @@ app.use(bodyParser.json());
 const sseConnections = new Map();
 let connectionIdCounter = 0;
 
+// OAuth認証セッション管理
+const authSessions = new Map();
+
+// 環境変数
+const DUO_API_HOSTNAME = process.env.DUO_API_HOSTNAME;
+const DUO_CLIENT_ID = process.env.DUO_CLIENT_ID;
+const DUO_CLIENT_SECRET = process.env.DUO_CLIENT_SECRET;
+const DUO_TOKEN_INTROSPECTION_ENDPOINT = process.env.DUO_TOKEN_INTROSPECTION_ENDPOINT;
+const DUO_REDIRECT_URI = process.env.DUO_REDIRECT_URI || `https://${process.env.RENDER_EXTERNAL_HOSTNAME}/auth/callback`;
+
 // ===== Duo Token Introspection =====
 async function verifyDuoToken(token) {
   try {
-    const response = await fetch(process.env.DUO_TOKEN_INTROSPECTION_ENDPOINT, {
+    const response = await fetch(DUO_TOKEN_INTROSPECTION_ENDPOINT, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
         'Authorization': 'Basic ' + Buffer.from(
-          `${process.env.DUO_CLIENT_ID}:${process.env.DUO_CLIENT_SECRET}`
+          `${DUO_CLIENT_ID}:${DUO_CLIENT_SECRET}`
         ).toString('base64')
       },
       body: new URLSearchParams({ token })
@@ -33,7 +44,7 @@ async function verifyDuoToken(token) {
     }
 
     const data = await response.json();
-    
+
     if (!data.active) {
       throw new Error('Token is not active');
     }
@@ -98,7 +109,7 @@ function sendJSONRPCError(res, id, code, message) {
 // ===== Slack API =====
 async function postToSlack(channel, text, username) {
   const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
-  
+
   if (!SLACK_BOT_TOKEN) {
     throw new Error('SLACK_BOT_TOKEN が設定されていません');
   }
@@ -116,7 +127,7 @@ async function postToSlack(channel, text, username) {
   });
 
   const data = await response.json();
-  
+
   if (!data.ok) {
     throw new Error(data.error || 'Slack API エラー');
   }
@@ -124,9 +135,182 @@ async function postToSlack(channel, text, username) {
   return data;
 }
 
+// ===== OAuth Authentication Endpoints =====
+
+// 1. 認証開始
+app.get('/auth/duo-initiate', (req, res) => {
+  if (!DUO_API_HOSTNAME || !DUO_CLIENT_ID) {
+    return res.status(500).json({ error: 'Duo OAuth not configured' });
+  }
+
+  const state = crypto.randomBytes(32).toString('hex');
+  const codeVerifier = crypto.randomBytes(32).toString('base64url');
+  const codeChallenge = crypto
+    .createHash('sha256')
+    .update(codeVerifier)
+    .digest('base64url');
+
+  // セッション保存
+  authSessions.set(state, {
+    codeVerifier,
+    timestamp: Date.now(),
+    authenticated: false
+  });
+
+  // 古いセッションをクリーンアップ（10分以上前）
+  for (const [key, value] of authSessions.entries()) {
+    if (Date.now() - value.timestamp > 10 * 60 * 1000) {
+      authSessions.delete(key);
+    }
+  }
+
+  const authUrl = `https://${DUO_API_HOSTNAME}/oauth/v1/authorize?` +
+    `response_type=code&` +
+    `client_id=${encodeURIComponent(DUO_CLIENT_ID)}&` +
+    `redirect_uri=${encodeURIComponent(DUO_REDIRECT_URI)}&` +
+    `state=${state}&` +
+    `code_challenge=${codeChallenge}&` +
+    `code_challenge_method=S256&` +
+    `scope=openid`;
+
+  console.log('🔑 認証URL生成:', state);
+  res.json({ authUrl, state });
+});
+
+// 2. コールバック処理
+app.get('/auth/callback', async (req, res) => {
+  const { code, state } = req.query;
+
+  if (!code || !state) {
+    return res.status(400).send('Missing code or state parameter');
+  }
+
+  const session = authSessions.get(state);
+  if (!session) {
+    return res.status(400).send('Invalid or expired session');
+  }
+
+  try {
+    console.log('🔄 トークン交換中...');
+    
+    // トークン交換
+    const tokenResponse = await fetch(`https://${DUO_API_HOSTNAME}/oauth/v1/token`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Authorization': `Basic ${Buffer.from(`${DUO_CLIENT_ID}:${DUO_CLIENT_SECRET}`).toString('base64')}`
+      },
+      body: new URLSearchParams({
+        grant_type: 'authorization_code',
+        code: code,
+        redirect_uri: DUO_REDIRECT_URI,
+        code_verifier: session.codeVerifier
+      })
+    });
+
+    if (!tokenResponse.ok) {
+      const errorText = await tokenResponse.text();
+      throw new Error(`Token exchange failed: ${tokenResponse.status} - ${errorText}`);
+    }
+
+    const tokenData = await tokenResponse.json();
+    
+    // セッションを更新
+    session.authenticated = true;
+    session.accessToken = tokenData.access_token;
+    session.refreshToken = tokenData.refresh_token;
+    session.expiresAt = Date.now() + (tokenData.expires_in * 1000);
+
+    console.log('✅ 認証成功！');
+
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <title>Authentication Successful</title>
+          <style>
+            body { 
+              font-family: Arial, sans-serif; 
+              padding: 40px; 
+              text-align: center; 
+              background: #f5f5f5;
+            }
+            .container {
+              background: white;
+              border-radius: 8px;
+              padding: 40px;
+              max-width: 500px;
+              margin: 0 auto;
+              box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            }
+            .success { 
+              color: #28a745; 
+              font-size: 48px; 
+              margin: 20px 0; 
+            }
+            .title {
+              font-size: 24px;
+              font-weight: bold;
+              margin: 20px 0;
+            }
+            .info { 
+              color: #666; 
+              margin: 20px 0;
+            }
+          </style>
+        </head>
+        <body>
+          <div class="container">
+            <div class="success">✓</div>
+            <div class="title">Authentication Successful!</div>
+            <div class="info">You can now close this window and return to your terminal.</div>
+          </div>
+        </body>
+      </html>
+    `);
+
+  } catch (error) {
+    console.error('❌ 認証エラー:', error.message);
+    res.status(500).send(`
+      <!DOCTYPE html>
+      <html>
+        <head><title>Authentication Failed</title></head>
+        <body style="font-family: Arial; padding: 40px; text-align: center;">
+          <h1 style="color: #dc3545;">Authentication Failed</h1>
+          <p>${error.message}</p>
+        </body>
+      </html>
+    `);
+  }
+});
+
+// 3. 認証状態確認
+app.get('/auth/status', (req, res) => {
+  const { state } = req.query;
+
+  if (!state) {
+    return res.status(400).json({ error: 'Missing state parameter' });
+  }
+
+  const session = authSessions.get(state);
+  if (!session) {
+    return res.json({ authenticated: false, error: 'Session not found' });
+  }
+
+  res.json({
+    authenticated: session.authenticated,
+    token: session.authenticated ? session.accessToken : undefined,
+    expiresAt: session.expiresAt
+  });
+});
+
 // ===== Health Check Endpoint =====
 app.get('/health', (req, res) => {
-  res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
+  res.status(200).json({ 
+    status: 'ok',
+    duoOAuthConfigured: !!(DUO_API_HOSTNAME && DUO_CLIENT_ID),
+    timestamp: new Date().toISOString() 
+  });
 });
 
 // ===== GET /mcp - SSE接続確立 =====
@@ -142,7 +326,7 @@ app.get('/mcp', async (req, res) => {
 
   console.log('🔍 トークン検証中...');
   const verification = await verifyDuoToken(token);
-  
+
   if (!verification.valid) {
     console.error('❌ トークン検証失敗');
     return res.status(401).json({ error: 'Invalid or expired token' });
@@ -174,8 +358,8 @@ app.get('/mcp', async (req, res) => {
   console.log(`   現在のSSE接続数: ${sseConnections.size}`);
 
   // 初期接続確認メッセージ
-  sendSSE(res, 'endpoint', { 
-    path: '/mcp', 
+  sendSSE(res, 'endpoint', {
+    path: '/mcp',
     connectionId: connectionId,
     authenticated: true,
     user: verification.displayName
@@ -191,7 +375,7 @@ app.get('/mcp', async (req, res) => {
 // ===== POST /mcp - JSON-RPCメッセージ処理 =====
 app.post('/mcp', async (req, res) => {
   console.log('\n📨 POST /mcp - メッセージ受信');
-  
+
   const message = req.body;
   console.log('   Method:', message.method);
   console.log('   ID:', message.id);
@@ -230,7 +414,7 @@ app.post('/mcp', async (req, res) => {
     // JSON-RPCメッセージを処理
     if (message.method === 'initialize') {
       console.log('🔧 Initialize リクエスト処理中...');
-      
+
       sendJSONRPCResponse(sseRes, message.id, {
         protocolVersion: '2024-11-05',
         capabilities: {
@@ -248,7 +432,7 @@ app.post('/mcp', async (req, res) => {
 
     if (message.method === 'tools/list') {
       console.log('🔧 Tools/List リクエスト処理中...');
-      
+
       sendJSONRPCResponse(sseRes, message.id, {
         tools: [
           {
@@ -278,7 +462,7 @@ app.post('/mcp', async (req, res) => {
 
     if (message.method === 'tools/call') {
       console.log('🔧 Tools/Call リクエスト処理中...');
-      
+
       const toolName = message.params?.name;
       const args = message.params?.arguments;
 
@@ -287,7 +471,7 @@ app.post('/mcp', async (req, res) => {
 
         console.log(`📤 Slack投稿: ${userName} -> #${channel}`);
         console.log(`   メッセージ: ${text.substring(0, 50)}...`);
-        
+
         const result = await postToSlack(channel, text, userName);
 
         sendJSONRPCResponse(sseRes, message.id, {
@@ -340,11 +524,14 @@ setInterval(() => {
 // ===== サーバー起動 =====
 app.listen(port, () => {
   console.log('═══════════════════════════════════════');
-  console.log('🚀 MCP Server with Duo Token Verification');
+  console.log('🚀 MCP Server with Duo OAuth + Token Verification');
   console.log('═══════════════════════════════════════');
   console.log(`   ポート: ${port}`);
   console.log(`   エンドポイント: /mcp`);
-  console.log(`   認証方式: Duo Token Introspection`);
+  console.log(`   認証方式: Duo OAuth + Token Introspection`);
   console.log(`   Health Check: /health`);
+  console.log(`   OAuth initiate: /auth/duo-initiate`);
+  console.log(`   OAuth callback: /auth/callback`);
+  console.log(`   OAuth status: /auth/status`);
   console.log('\n待機中...\n');
 });
