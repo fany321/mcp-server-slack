@@ -19,7 +19,8 @@ let connectionIdCounter = 0;
 const authSessions = new Map();
 
 // 環境変数
-const DUO_API_HOSTNAME = process.env.DUO_API_HOSTNAME;
+const DUO_AUTHORIZATION_ENDPOINT = process.env.DUO_AUTHORIZATION_ENDPOINT;
+const DUO_TOKEN_ENDPOINT = process.env.DUO_TOKEN_ENDPOINT;
 const DUO_CLIENT_ID = process.env.DUO_CLIENT_ID;
 const DUO_CLIENT_SECRET = process.env.DUO_CLIENT_SECRET;
 const DUO_TOKEN_INTROSPECTION_ENDPOINT = process.env.DUO_TOKEN_INTROSPECTION_ENDPOINT;
@@ -139,7 +140,7 @@ async function postToSlack(channel, text, username) {
 
 // 1. 認証開始
 app.get('/auth/duo-initiate', (req, res) => {
-  if (!DUO_API_HOSTNAME || !DUO_CLIENT_ID) {
+  if (!DUO_AUTHORIZATION_ENDPOINT || !DUO_CLIENT_ID) {
     return res.status(500).json({ error: 'Duo OAuth not configured' });
   }
 
@@ -164,14 +165,14 @@ app.get('/auth/duo-initiate', (req, res) => {
     }
   }
 
-  const authUrl = `https://${DUO_API_HOSTNAME}/oauth/v1/authorize?` +
+  const authUrl = `${DUO_AUTHORIZATION_ENDPOINT}?` +
     `response_type=code&` +
     `client_id=${encodeURIComponent(DUO_CLIENT_ID)}&` +
     `redirect_uri=${encodeURIComponent(DUO_REDIRECT_URI)}&` +
     `state=${state}&` +
     `code_challenge=${codeChallenge}&` +
     `code_challenge_method=S256&` +
-    `scope=openid`;
+    `scope=openid profile email`;
 
   console.log('🔑 認証URL生成:', state);
   res.json({ authUrl, state });
@@ -194,7 +195,7 @@ app.get('/auth/callback', async (req, res) => {
     console.log('🔄 トークン交換中...');
     
     // トークン交換
-    const tokenResponse = await fetch(`https://${DUO_API_HOSTNAME}/oauth/v1/token`, {
+    const tokenResponse = await fetch(DUO_TOKEN_ENDPOINT, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
@@ -308,7 +309,7 @@ app.get('/auth/status', (req, res) => {
 app.get('/health', (req, res) => {
   res.status(200).json({ 
     status: 'ok',
-    duoOAuthConfigured: !!(DUO_API_HOSTNAME && DUO_CLIENT_ID),
+    duoOAuthConfigured: !!(DUO_AUTHORIZATION_ENDPOINT && DUO_TOKEN_ENDPOINT && DUO_CLIENT_ID),
     timestamp: new Date().toISOString() 
   });
 });
