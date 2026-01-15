@@ -5,7 +5,7 @@
   "type": "module",
   "main": "server-http-duo-render.js",
   "scripts": {
-    "start": "node server-http-duo-render.js",
+    "start": "node server-http.js",
     "dev": "node --watch server-http-duo-render.js"
   },
   "keywords": [
